@@ -148,6 +148,12 @@ if (claudeBinaryPath) {
   console.warn(`[${name}] could not resolve native claude binary; SDK will fall back`);
 }
 
+// Load filesystem settings from ~/.claude (user), <cwd>/.claude (project),
+// and <cwd>/.claude/settings.local.json (local). SDK 0.2.x defaults to
+// isolation mode, which silently skips CLAUDE.md, skills, agents, hooks,
+// and commands. Including 'project' is required to pick up CLAUDE.md.
+const SETTING_SOURCES = ["user", "project", "local"] as const;
+
 let ws: WebSocket | null = null;
 let sessionId: string | null = initialSessionId ?? null;
 // Always send intro on first turn — it contains the critical send_chat instruction.
@@ -230,6 +236,7 @@ async function runUsagePassthrough(requester: string) {
         ...(agentModel ? { model: agentModel } : {}),
         ...(agentEffort ? { effort: agentEffort } : {}),
         ...(claudeBinaryPath ? { pathToClaudeCodeExecutable: claudeBinaryPath } : {}),
+        settingSources: [...SETTING_SOURCES],
         mcpServers: {
           "agent-chat": { type: "sdk", name: "agent-chat", instance: chatServer.instance },
         },
@@ -288,6 +295,7 @@ async function runCompact(requester: string) {
         ...(agentModel ? { model: agentModel } : {}),
         ...(agentEffort ? { effort: agentEffort } : {}),
         ...(claudeBinaryPath ? { pathToClaudeCodeExecutable: claudeBinaryPath } : {}),
+        settingSources: [...SETTING_SOURCES],
         mcpServers: {
           "agent-chat": { type: "sdk", name: "agent-chat", instance: chatServer.instance },
         },
@@ -501,6 +509,7 @@ async function processQueue() {
         ...(agentModel ? { model: agentModel } : {}),
         ...(agentEffort ? { effort: agentEffort } : {}),
         ...(claudeBinaryPath ? { pathToClaudeCodeExecutable: claudeBinaryPath } : {}),
+        settingSources: [...SETTING_SOURCES],
         mcpServers: {
           "agent-chat": { type: "sdk", name: "agent-chat", instance: chatServer.instance },
         },
