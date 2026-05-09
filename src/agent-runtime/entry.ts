@@ -1,5 +1,3 @@
-import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import { z } from "zod";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -14,7 +12,15 @@ import {
   type ActivityKind,
 } from "../shared/protocol.ts";
 import { makeIntro } from "./helpers/intro.ts";
-import { accumulateModelUsage, formatUsage } from "./helpers/usage.ts";
+import { createHubBridge } from "./hub-bridge.ts";
+import {
+  EFFORT_LEVELS,
+  ResumeFailedError,
+  type AgentBackend,
+  type EffortLevel,
+  type PermissionMode,
+} from "./backends/types.ts";
+import { createClaudeBackend } from "./backends/claude.ts";
 
 const args = process.argv.slice(2);
 
@@ -36,24 +42,22 @@ function extractFlagValue(flag: string): string | undefined {
 }
 const modelFlag = extractFlagValue("--model");
 const effortFlag = extractFlagValue("--effort");
+const backendFlag = extractFlagValue("--backend");
 
 const positional = args.filter((a) => !a.startsWith("--"));
 const name = positional[0] ?? process.env.AGENT_NAME;
 const cwdArg = positional[1] ?? process.env.AGENT_CWD ?? process.cwd();
 const hubUrl = process.env.HUB_URL ?? "ws://localhost:8787";
 const agentRoom = process.env.AGENT_ROOM ?? DEFAULT_ROOM;
-// Resume session ID is passed by the desktop app via env (no interactive picker)
 const initialSessionId = process.env.RESUME_SESSION_ID || undefined;
-let agentModel: string | undefined =
-  modelFlag ?? process.env.AGENT_MODEL ?? undefined;
+const backendKind = (backendFlag ?? process.env.AGENT_BACKEND ?? "claude").toLowerCase();
+const initialModel = modelFlag ?? process.env.AGENT_MODEL ?? undefined;
 
-type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
-const EFFORT_LEVELS: EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
-let agentEffort: EffortLevel | undefined =
+let initialEffort: EffortLevel | undefined =
   (effortFlag as EffortLevel) ?? (process.env.AGENT_EFFORT as EffortLevel) ?? undefined;
-if (agentEffort && !EFFORT_LEVELS.includes(agentEffort)) {
-  console.warn(`[${name}] invalid effort '${agentEffort}', ignoring`);
-  agentEffort = undefined;
+if (initialEffort && !EFFORT_LEVELS.includes(initialEffort)) {
+  console.warn(`[${name}] invalid effort '${initialEffort}', ignoring`);
+  initialEffort = undefined;
 }
 
 if (!name) {
@@ -66,22 +70,6 @@ if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
   console.error(`[${name}] cwd does not exist or is not a directory: ${cwd}`);
   process.exit(1);
 }
-
-type PermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "plan";
-
-const MODE_ALIASES: Record<string, PermissionMode> = {
-  default: "default",
-  ask: "default",
-  normal: "default",
-  accept: "acceptEdits",
-  acceptedits: "acceptEdits",
-  acceptEdits: "acceptEdits",
-  edits: "acceptEdits",
-  bypass: "bypassPermissions",
-  bypassPermissions: "bypassPermissions",
-  auto: "bypassPermissions",
-  plan: "plan",
-};
 
 function isLocalHubUrl(url: string): boolean {
   try {
@@ -98,77 +86,47 @@ if (!hubIsLocal) {
     `[${name}] hub at ${hubUrl} is non-local — defaulting permissionMode to acceptEdits.`,
   );
 }
-if (agentModel) {
-  console.log(`[${name}] model=${agentModel} (override)`);
-}
-if (agentEffort) {
-  console.log(`[${name}] effort=${agentEffort} (override)`);
-}
+if (initialModel) console.log(`[${name}] model=${initialModel} (override)`);
+if (initialEffort) console.log(`[${name}] effort=${initialEffort} (override)`);
 if (initialSessionId) {
   console.log(`[${name}] resuming session ${initialSessionId.slice(0, 8)}…`);
 }
 
-// SDK 0.2.x ships the Claude Code CLI as a per-platform native binary
-// (e.g. @anthropic-ai/claude-agent-sdk-darwin-arm64/claude). The SDK's
-// internal resolver returns a path inside app.asar in packaged builds,
-// and Electron's automatic asar→unpacked translation does not fire for
-// child_process.spawn from a utilityProcess context — every turn dies
-// with ENOTDIR. Resolve the binary ourselves and rewrite the path so
-// the OS sees the real file in app.asar.unpacked/.
-function resolveClaudeBinary(): string | undefined {
-  const exe = process.platform === "win32" ? "claude.exe" : "claude";
-  const candidates =
-    process.platform === "linux"
-      ? [
-          `@anthropic-ai/claude-agent-sdk-linux-${process.arch}-musl/${exe}`,
-          `@anthropic-ai/claude-agent-sdk-linux-${process.arch}/${exe}`,
-        ]
-      : [`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/${exe}`];
-  for (const c of candidates) {
-    try {
-      let resolved = require.resolve(c);
-      // Electron packs node_modules into app.asar but Forge unpacks the
-      // claude-agent-sdk* subtree to app.asar.unpacked. require.resolve
-      // returns the asar path; rewrite to the unpacked sibling.
-      if (resolved.includes(`${path.sep}app.asar${path.sep}`)) {
-        resolved = resolved.replace(
-          `${path.sep}app.asar${path.sep}`,
-          `${path.sep}app.asar.unpacked${path.sep}`,
-        );
-      }
-      if (fs.existsSync(resolved)) return resolved;
-    } catch {}
-  }
-  return undefined;
-}
-const claudeBinaryPath = resolveClaudeBinary();
-if (claudeBinaryPath) {
-  console.log(`[${name}] claude binary: ${claudeBinaryPath}`);
-} else {
-  console.warn(`[${name}] could not resolve native claude binary; SDK will fall back`);
-}
-
-// Load filesystem settings from ~/.claude (user), <cwd>/.claude (project),
-// and <cwd>/.claude/settings.local.json (local). SDK 0.2.x defaults to
-// isolation mode, which silently skips CLAUDE.md, skills, agents, hooks,
-// and commands. Including 'project' is required to pick up CLAUDE.md.
-const SETTING_SOURCES = ["user", "project", "local"] as const;
+const initialPermissionMode: PermissionMode = hubIsLocal
+  ? "bypassPermissions"
+  : "acceptEdits";
 
 let ws: WebSocket | null = null;
-let sessionId: string | null = initialSessionId ?? null;
-// Always send intro on first turn — it contains the critical send_chat instruction.
-// For resumed sessions Claude already has context, but still needs the current
-// participant list and send_chat reminder for this new connection.
-let introSent = false;
 let roster: Participant[] = [];
+
+const bridge = createHubBridge({
+  getWs: () => ws,
+  getRoster: () => roster,
+});
+
+let backend: AgentBackend;
+if (backendKind === "claude") {
+  backend = createClaudeBackend({
+    agentName: name!,
+    cwd,
+    initialModel,
+    initialEffort,
+    initialPermissionMode,
+    initialSessionId,
+    bridge,
+  });
+} else {
+  console.error(`[${name}] unsupported backend '${backendKind}'`);
+  process.exit(1);
+}
+
+// Always send intro on first turn — it contains the critical send_chat instruction.
+let introSent = false;
 const queue: { from: string; content: string }[] = [];
 type TaskKind = "turn" | "compact" | "usage";
 let currentTask: TaskKind | null = null;
 let currentAbort: AbortController | null = null;
 let paused = false;
-let totalCost = 0;
-let totalTurns = 0;
-let sendChatCallCount = 0;
 
 function startTask(kind: TaskKind): AbortController | null {
   if (currentTask !== null) return null;
@@ -185,12 +143,9 @@ function finishTask(controller: AbortController) {
   }
 }
 
-let permissionMode: PermissionMode = hubIsLocal ? "bypassPermissions" : "acceptEdits";
-
-function setSessionId(id: string | null) {
-  sessionId = id;
+function reportSessionId(id: string) {
   // Report session ID to main process via stdout (parsed by agent-manager.ts)
-  if (id) console.log(`[${name}] __SESSION_ID__:${id}`);
+  console.log(`[${name}] __SESSION_ID__:${id}`);
 }
 
 let lastActivity: { kind: ActivityKind; tool?: string } | null = null;
@@ -199,81 +154,61 @@ function sendActivity(kind: ActivityKind, tool?: string) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   if (lastActivity && lastActivity.kind === kind && lastActivity.tool === tool) return;
   lastActivity = { kind, tool };
-  ws.send(encode({ type: MSG.ACTIVITY, name, kind, tool, ts: Date.now(), room: agentRoom }));
+  ws.send(
+    encode({
+      type: MSG.ACTIVITY,
+      name,
+      kind,
+      tool,
+      ts: Date.now(),
+      room: agentRoom,
+    }),
+  );
 }
 
 function sendAck(op: ControlOp, ok: boolean, info?: string, fromRequester?: string) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(encode({
-    type: MSG.CONTROL_ACK,
-    target: name,
-    op,
-    from: fromRequester ?? "?",
-    ok,
-    info,
-    ts: Date.now(),
-    room: agentRoom,
-  }));
+  ws.send(
+    encode({
+      type: MSG.CONTROL_ACK,
+      target: name,
+      op,
+      from: fromRequester ?? "?",
+      ok,
+      info,
+      ts: Date.now(),
+      room: agentRoom,
+    }),
+  );
 }
 
-async function runUsagePassthrough(requester: string) {
+async function runUsage(requester: string) {
+  if (!backend.usage) {
+    sendAck("usage", false, "backend does not support /usage", requester);
+    return;
+  }
   const controller = startTask("usage");
   if (!controller) {
     sendAck("usage", false, `busy: in ${currentTask}`, requester);
     return;
   }
-  sendActivity("usage");
-  let resultText = "";
-  let failure: string | null = null;
   try {
-    const res = query({
-      prompt: "/usage",
-      options: {
-        cwd,
-        permissionMode,
-        resume: sessionId ?? undefined,
-        abortController: controller,
-        ...(agentModel ? { model: agentModel } : {}),
-        ...(agentEffort ? { effort: agentEffort } : {}),
-        ...(claudeBinaryPath ? { pathToClaudeCodeExecutable: claudeBinaryPath } : {}),
-        settingSources: [...SETTING_SOURCES],
-        mcpServers: {
-          "agent-chat": { type: "sdk", name: "agent-chat", instance: chatServer.instance },
-        },
-      },
+    const res = await backend.usage({
+      abort: controller,
+      onActivity: sendActivity,
+      onSessionId: reportSessionId,
     });
-    for await (const msg of res) {
-      if ("session_id" in msg && msg.session_id) setSessionId(msg.session_id);
-      if (msg.type === "result") {
-        const r = msg as { result?: string };
-        if (typeof r.result === "string" && r.result.length > 0) {
-          resultText = r.result.trim();
-        }
-      }
-    }
-  } catch (e) {
-    const err = e as { message?: string };
-    failure = controller.signal.aborted
-      ? "aborted"
-      : `CLI /usage failed: ${err.message ?? String(e)}`;
+    sendAck("usage", res.ok, res.info, requester);
   } finally {
     finishTask(controller);
+    if (queue.length > 0) processQueue();
+    else sendActivity("idle");
   }
-  if (failure) {
-    sendAck("usage", true, `${formatUsage(totalCost, totalTurns)}\n(${failure})`, requester);
-  } else {
-    const combined = resultText
-      ? `${formatUsage(totalCost, totalTurns)}\n${resultText}`
-      : `${formatUsage(totalCost, totalTurns)}\n(CLI /usage returned no data)`;
-    sendAck("usage", true, combined, requester);
-  }
-  if (queue.length > 0) processQueue();
-  else sendActivity("idle");
 }
 
 async function runCompact(requester: string) {
-  if (!sessionId) {
-    sendAck("compact", false, "no active session to compact", requester);
+  if (!backend.compact) {
+    sendAck("compact", false, "backend does not support /compact", requester);
     return;
   }
   const controller = startTask("compact");
@@ -281,42 +216,13 @@ async function runCompact(requester: string) {
     sendAck("compact", false, `busy: in ${currentTask}`, requester);
     return;
   }
-  console.log(`[${name}] /compact starting (session=${sessionId})`);
-  sendActivity("compact");
-  let acked = false;
   try {
-    const res = query({
-      prompt: "/compact",
-      options: {
-        cwd,
-        permissionMode,
-        resume: sessionId ?? undefined,
-        abortController: controller,
-        ...(agentModel ? { model: agentModel } : {}),
-        ...(agentEffort ? { effort: agentEffort } : {}),
-        ...(claudeBinaryPath ? { pathToClaudeCodeExecutable: claudeBinaryPath } : {}),
-        settingSources: [...SETTING_SOURCES],
-        mcpServers: {
-          "agent-chat": { type: "sdk", name: "agent-chat", instance: chatServer.instance },
-        },
-      },
+    const res = await backend.compact({
+      abort: controller,
+      onActivity: sendActivity,
+      onSessionId: reportSessionId,
     });
-    for await (const msg of res) {
-      if ("session_id" in msg && msg.session_id) setSessionId(msg.session_id);
-      if (msg.type === "system" && (msg as { subtype?: string }).subtype === "compact_boundary") {
-        const meta = (msg as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
-        sendAck("compact", true, `compacted (pre=${meta?.pre_tokens ?? "?"} tokens)`, requester);
-        acked = true;
-      }
-    }
-    if (!acked) sendAck("compact", true, "done", requester);
-  } catch (e) {
-    const err = e as { message?: string };
-    if (controller.signal.aborted) {
-      sendAck("compact", false, "aborted", requester);
-    } else {
-      sendAck("compact", false, `error: ${err.message ?? String(e)}`, requester);
-    }
+    sendAck("compact", res.ok, res.info, requester);
   } finally {
     finishTask(controller);
     if (queue.length > 0) processQueue();
@@ -330,10 +236,10 @@ function handleControl(msg: ControlMsg) {
   console.log(`[${name}] control from ${requester}: ${op}`);
   switch (op) {
     case "clear": {
-      const prev = sessionId;
+      const prev = backend.getSessionId();
       const inflight = currentTask;
       currentAbort?.abort();
-      setSessionId(null);
+      backend.setSessionId(null);
       introSent = false;
       queue.length = 0;
       const note = prev
@@ -342,73 +248,69 @@ function handleControl(msg: ControlMsg) {
       sendAck(op, true, note, requester);
       return;
     }
-    case "compact": void runCompact(requester); return;
+    case "compact":
+      void runCompact(requester);
+      return;
     case "status": {
+      const s = backend.status();
       const lines = [
-        `session=${sessionId ?? "(none)"}`,
-        `mode=${permissionMode}`,
-        `model=${agentModel ?? "(sdk default)"}`,
-        `effort=${agentEffort ?? "(sdk default)"}`,
+        `session=${s.session ?? "(none)"}`,
+        `mode=${s.mode}`,
+        `model=${s.model}`,
+        `effort=${s.effort}`,
         `task=${currentTask ?? "idle"}`,
         `paused=${paused}`,
         `queue=${queue.length}`,
-        `turns=${totalTurns}`,
-        `totalCost=$${totalCost.toFixed(4)}`,
       ];
+      if (s.extra) {
+        for (const [k, v] of Object.entries(s.extra)) lines.push(`${k}=${v}`);
+      }
       sendAck(op, true, lines.join(" · "), requester);
       return;
     }
-    case "usage": void runUsagePassthrough(requester); return;
+    case "usage":
+      void runUsage(requester);
+      return;
     case "mode": {
+      if (!backend.setMode) {
+        sendAck(op, false, "backend does not support mode changes", requester);
+        return;
+      }
       const argRaw = (msg.arg ?? "").trim();
       if (!argRaw) {
-        sendAck(op, true, `current=${permissionMode}`, requester);
+        sendAck(op, true, `current=${backend.status().mode}`, requester);
         return;
       }
-      const resolved = MODE_ALIASES[argRaw] ?? MODE_ALIASES[argRaw.toLowerCase()];
-      if (!resolved) {
-        sendAck(op, false, `unknown mode '${argRaw}'`, requester);
-        return;
-      }
-      const prev = permissionMode;
-      permissionMode = resolved;
-      sendAck(op, true, `${prev} → ${resolved}`, requester);
+      const r = backend.setMode(argRaw);
+      sendAck(op, r.ok, r.info, requester);
       return;
     }
     case "model": {
-      const argRaw = (msg.arg ?? "").trim();
-      if (!argRaw) {
-        sendAck(op, true, `current=${agentModel ?? "(sdk default)"}`, requester);
+      if (!backend.setModel) {
+        sendAck(op, false, "backend does not support model changes", requester);
         return;
       }
-      const prev = agentModel ?? "(sdk default)";
-      if (argRaw === "default" || argRaw === "clear" || argRaw === "reset") {
-        agentModel = undefined;
-      } else {
-        agentModel = argRaw;
+      const argRaw = (msg.arg ?? "").trim();
+      if (!argRaw) {
+        sendAck(op, true, `current=${backend.status().model}`, requester);
+        return;
       }
-      sendAck(op, true, `${prev} → ${agentModel ?? "(sdk default)"} (applies to next turn)`, requester);
+      const r = backend.setModel(argRaw);
+      sendAck(op, r.ok, r.info, requester);
       return;
     }
     case "effort": {
-      const argRaw = (msg.arg ?? "").trim().toLowerCase() as EffortLevel;
+      if (!backend.setEffort) {
+        sendAck(op, false, "backend does not support effort changes", requester);
+        return;
+      }
+      const argRaw = (msg.arg ?? "").trim().toLowerCase();
       if (!argRaw) {
-        sendAck(op, true, `current=${agentEffort ?? "(sdk default)"}`, requester);
+        sendAck(op, true, `current=${backend.status().effort}`, requester);
         return;
       }
-      if (argRaw === "default" || argRaw === "clear" || argRaw === "reset") {
-        const prev = agentEffort ?? "(sdk default)";
-        agentEffort = undefined;
-        sendAck(op, true, `${prev} → (sdk default) (applies to next turn)`, requester);
-        return;
-      }
-      if (!EFFORT_LEVELS.includes(argRaw)) {
-        sendAck(op, false, `invalid effort '${argRaw}' — use: ${EFFORT_LEVELS.join(", ")}`, requester);
-        return;
-      }
-      const prev = agentEffort ?? "(sdk default)";
-      agentEffort = argRaw;
-      sendAck(op, true, `${prev} → ${agentEffort} (applies to next turn)`, requester);
+      const r = backend.setEffort(argRaw);
+      sendAck(op, r.ok, r.info, requester);
       return;
     }
     case "pause": {
@@ -433,46 +335,6 @@ function handleControl(msg: ControlMsg) {
   }
 }
 
-const sendChatTool = tool(
-  "send_chat",
-  "Send a message to the group chat. Use @name to address a participant. This is the ONLY way to deliver a message to other participants — anything else you output stays local.",
-  {
-    content: z.string().describe(
-      "Message text. Use @name to mention participants. For file references, just write the path.",
-    ),
-  },
-  async ({ content }) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(encode({ type: MSG.MESSAGE, content }));
-      sendChatCallCount += 1;
-      process.stdout.write(`[${name} -> chat] ${content}\n`);
-      return { content: [{ type: "text" as const, text: "sent" }] };
-    }
-    return {
-      content: [{ type: "text" as const, text: "error: not connected to hub" }],
-      isError: true,
-    };
-  },
-);
-
-const getParticipantsTool = tool(
-  "get_participants",
-  "Get the current list of participants in the chat room. Returns names and roles (human/agent).",
-  {},
-  async () => {
-    const list = roster.length > 0
-      ? roster.map((p) => `${p.name} (${p.role})`).join(", ")
-      : "(no participants)";
-    return { content: [{ type: "text" as const, text: list }] };
-  },
-);
-
-const chatServer = createSdkMcpServer({
-  name: "agent-chat",
-  version: "1.0.0",
-  tools: [sendChatTool, getParticipantsTool],
-});
-
 async function processQueue() {
   if (paused || queue.length === 0) return;
   const controller = startTask("turn");
@@ -480,10 +342,11 @@ async function processQueue() {
   const batch = queue.splice(0, queue.length);
   let header = "";
   if (!introSent) {
-    if (initialSessionId) {
-      // Resumed session: keep it short to avoid context overflow.
-      // The previous session already has the full instructions.
-      header = `You are "${name!}", a Claude Code agent (cwd: ${cwd}). ` +
+    if (initialSessionId && backend.getSessionId() === initialSessionId) {
+      // Resumed session: keep it short. The previous session has the full
+      // instructions; just refresh the send_chat reminder.
+      header =
+        `You are "${name!}", a Claude Code agent (cwd: ${cwd}). ` +
         `You are resuming a previous session. ` +
         `IMPORTANT: use the send_chat tool to reply — plain text is silently dropped.\n\n`;
     } else {
@@ -496,87 +359,45 @@ async function processQueue() {
 
   console.log(`\n[${name}] --- turn (${batch.length} incoming) ---`);
   sendActivity("thinking");
-  const sendChatBefore = sendChatCallCount;
-  let resultText = "";
-  const runQuery = async (resumeId: string | undefined) => {
-    const res = query({
-      prompt: promptText,
-      options: {
-        cwd,
-        permissionMode,
-        resume: resumeId,
-        abortController: controller,
-        ...(agentModel ? { model: agentModel } : {}),
-        ...(agentEffort ? { effort: agentEffort } : {}),
-        ...(claudeBinaryPath ? { pathToClaudeCodeExecutable: claudeBinaryPath } : {}),
-        settingSources: [...SETTING_SOURCES],
-        mcpServers: {
-          "agent-chat": { type: "sdk", name: "agent-chat", instance: chatServer.instance },
-        },
-      },
-    });
-    for await (const msg of res) {
-      if ("session_id" in msg && msg.session_id) setSessionId(msg.session_id);
-      if (msg.type === "assistant") {
-        const content = (msg as any).message?.content;
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block.type === "text" && block.text?.trim()) {
-              sendActivity("thinking");
-            } else if (block.type === "tool_use" && !String(block.name).endsWith("send_chat")) {
-              sendActivity("tool", String(block.name));
-            }
-          }
-        }
-      } else if (msg.type === "result") {
-        const r = msg as any;
-        if (typeof r.result === "string" && r.result.trim().length > 0) {
-          resultText = r.result.trim();
-        }
-        if (typeof r.total_cost_usd === "number") totalCost += r.total_cost_usd;
-        totalTurns += 1;
-        accumulateModelUsage(r.modelUsage);
-      }
-    }
-  };
+  const sendChatBefore = bridge.getCallCount();
 
   try {
+    let outcome: { resultText: string; costUsd: number };
     try {
-      await runQuery(sessionId ?? undefined);
+      outcome = await backend.runTurn({
+        prompt: promptText,
+        abort: controller,
+        onActivity: sendActivity,
+        onSessionId: reportSessionId,
+      });
     } catch (e: any) {
-      // If resume fails, retry as a fresh session
-      const isResumeError = sessionId && (
-        String(e?.message ?? e).includes("exited with code") ||
-        String(e?.message ?? e).includes("session")
-      );
-      if (isResumeError && !controller.signal.aborted) {
-        console.warn(`[${name}] resume failed (${e?.message}), retrying as fresh session`);
+      if (e instanceof ResumeFailedError && !controller.signal.aborted) {
+        console.warn(`[${name}] resume failed (${e.message}), retrying as fresh session`);
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(encode({
-            type: MSG.MESSAGE,
-            content: `_(session resume failed — starting fresh)_`,
-          }));
+          ws.send(
+            encode({
+              type: MSG.MESSAGE,
+              content: `_(session resume failed — starting fresh)_`,
+            }),
+          );
         }
-        setSessionId(null);
-        introSent = false; // re-send intro for the fresh session
-        // Re-add the batch back to queue and re-process as fresh
+        introSent = false;
         queue.unshift(...batch.map((m) => ({ from: m.from, content: m.content })));
-        return; // let finally → processQueue handle it
+        return; // finally → processQueue handles the retry
       }
-      throw e; // re-throw non-resume errors
+      throw e;
     }
 
-    if (sendChatCallCount === sendChatBefore && ws && ws.readyState === WebSocket.OPEN) {
-      if (resultText) {
-        ws.send(encode({ type: MSG.MESSAGE, content: resultText }));
-        sendChatCallCount += 1;
+    if (
+      bridge.getCallCount() === sendChatBefore &&
+      ws &&
+      ws.readyState === WebSocket.OPEN
+    ) {
+      if (outcome.resultText) {
+        bridge.sendChatMessage(outcome.resultText);
       } else {
         console.error(`[${name}] turn produced no output`);
-        ws.send(encode({
-          type: MSG.MESSAGE,
-          content: `_(turn completed with no response — try again)_`,
-        }));
-        sendChatCallCount += 1;
+        bridge.sendChatMessage(`_(turn completed with no response — try again)_`);
       }
     }
   } catch (e: any) {
@@ -673,12 +494,19 @@ function shutdown(signal: NodeJS.Signals) {
   if (shuttingDown) process.exit(130);
   shuttingDown = true;
   console.log(`[${name}] received ${signal}, exiting…`);
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  try { ws?.close(); } catch {}
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  try {
+    ws?.close();
+  } catch {}
   setTimeout(() => process.exit(0), SHUTDOWN_GRACE_MS).unref();
 }
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("uncaughtException", (e) => console.error(`[${name}] UNCAUGHT`, e));
-process.on("unhandledRejection", (e) => console.error(`[${name}] UNHANDLED REJECTION`, e));
+process.on("unhandledRejection", (e) =>
+  console.error(`[${name}] UNHANDLED REJECTION`, e),
+);
