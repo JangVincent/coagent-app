@@ -1,33 +1,45 @@
 # Coagent Desktop
 
-**coagent** 데스크톱 앱 — Claude Code 에이전트들과 함께하는 멀티 참가자 채팅.
+**coagent** 데스크톱 앱 — 사람과 코딩 에이전트 (Claude Code, Codex)가 같은 워크스페이스 룸에서 함께 일하는 멀티 참가자 채팅.
 
 [English](README.md)
 
+## 무엇을 하는가
+
+Coagent는 여러 코딩 에이전트를 동시에 띄워서 각각 자기 프로젝트 디렉토리에 핀 고정시키고, 같은 채팅방에 모읍니다. `@agent-name`으로 한 명을 호출하면 그 에이전트가 채팅 툴로 응답하고, 다른 에이전트의 컨텍스트가 필요하면 (`@other-agent 너희 레포에선 X 어떻게 처리해?`) 서로 물어보거나, 자기 프로젝트에 대해 직접 도구 (Read, Bash, Edit 등)를 실행할 수 있습니다.
+
+두 백엔드를 지원하고, 한 룸 안에 섞어 쓸 수 있습니다:
+
+- **Claude Code** — Anthropic의 `claude` CLI ([Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) 기반). `~/.claude/...`, `.claude/settings*.json`, `.claude/skills/`, `.claude/agents/`, `.claude/commands/`, hooks, `CLAUDE.md` 자동 로드.
+- **Codex** — OpenAI의 `codex` CLI ([@openai/codex](https://www.npmjs.com/package/@openai/codex)). `AGENTS.md`, `.agents/skills/`, `~/.codex/config.toml`, `~/.codex/agents/` 자동 로드. 프로젝트 스코프 레이어 (`.codex/config.toml`, hooks, 프로젝트 서브에이전트)는 에이전트 추가 시 한 번 동의(trust opt-in)하면 로드됩니다.
+
 ## 사전 준비
 
-coagent를 사용하기 전에 Claude Code CLI 인증이 필요합니다.
+각 백엔드의 에이전트를 추가하기 전에, 그 백엔드 CLI를 머신에서 한 번 인증해야 합니다. 두 바이너리 모두 coagent에 번들로 포함되지만, 로그인 플로우만큼은 머신당 한 번 직접 실행해야 합니다.
 
-### 방법 1: Claude 계정으로 로그인 (권장)
+### Claude Code
 
 ```bash
-# Claude Code CLI 설치
-npm install -g @anthropic-ai/claude-code
-
-# Claude 계정으로 로그인
+# 권장: Claude 계정으로 로그인
 claude login
-```
 
-### 방법 2: API Key 사용
-
-```bash
-# Anthropic API 키를 환경변수로 설정
+# 또는 API 키 사용 (~/.zshrc / ~/.bashrc 등에 추가해 영구 적용)
 export ANTHROPIC_API_KEY="sk-ant-api03-..."
 ```
 
-셸 프로필(`~/.zshrc`, `~/.bashrc` 등)에 추가하면 세션 간에도 유지됩니다.
+`claude` 명령이 PATH에 없다면 먼저 `npm install -g @anthropic-ai/claude-code`로 설치하세요.
 
-> 머신당 한 번만 설정하면 됩니다. coagent가 생성하는 에이전트들이 인증된 세션 또는 API 키를 사용합니다.
+### Codex
+
+```bash
+codex login
+```
+
+`codex` 명령이 PATH에 없다면 먼저 `npm install -g @openai/codex`로 설치하세요.
+
+> coagent는 에이전트 런타임용으로 자체 `claude`/`codex` 바이너리를 번들에 포함합니다. 따라서 글로벌 설치는 (a) 터미널에서 직접 CLI를 쓰고 싶거나, (b) `claude login` / `codex login`을 한 번 돌릴 때만 필요합니다.
+
+> Codex 에이전트는 `--dangerously-bypass-approvals-and-sandbox` 플래그로 실행됩니다. 현재 codex가 MCP 툴 호출을 자동 승인하는 유일한 모드라 — 채팅 왕복에 필수입니다 ([openai/codex#15437](https://github.com/openai/codex/issues/15437)). 작업 자체는 여전히 선택한 프로젝트 디렉토리 안에서만 일어나며, 이 플래그는 Codex 자체의 툴별 승인 프롬프트만 완화합니다.
 
 ## 설치
 
@@ -85,20 +97,42 @@ chmod +x coagent-*.AppImage
 
 Linux에서도 자동 업데이트가 활성화되어 있습니다.
 
+## 백엔드 비교
+
+| | Claude Code | Codex |
+|---|---|---|
+| 프로젝트 메모리 | `CLAUDE.md` | `AGENTS.md` |
+| Skills | `.claude/skills/` | `.agents/skills/` |
+| Subagents | `~/.claude/agents/`, `.claude/agents/` | `~/.codex/agents/`, `.codex/agents/` (프로젝트 trust 필요) |
+| Hooks / 설정 | `~/.claude`, `.claude/settings*.json` 자동 로드 | `~/.codex/config.toml` 자동 로드. 프로젝트 `.codex/`는 trust 필요 |
+| `/status` | 지원 | 지원 |
+| `/usage` | 지원 | codex CLI 미노출 |
+| `/compact` | 지원 (수동) | codex CLI 미노출 (`model_auto_compact_token_limit`로 자동만) |
+| `/clear` 세션 | 지원 | 지원 |
+| `/effort` | Low / Medium / High / XHigh / Max | Low / Medium / High / XHigh |
+| `/mode` | Default / Accept edits / Auto / Plan | 고정 (bypass — MCP 위해 필수, 사전 준비 참조) |
+| `/model` | Haiku 4.5 / Sonnet 4.6 / Opus 4.7 | gpt-5 / gpt-5-codex (API 키 전용) |
+| 과거 세션 picker로 resume | 지원 | 미지원 (새 에이전트는 항상 fresh, 살아있는 에이전트 안에서의 resume은 동작) |
+
+처음 어떤 프로젝트에 Codex 에이전트를 추가할 때, coagent가 `[projects."<path>"] trust_level = "trusted"` 항목을 `~/.codex/config.toml`에 추가할지 묻습니다. 거절해도 에이전트는 정상 동작하며, 다만 프로젝트 스코프 `.codex/` 오버라이드만 안 적용됩니다.
+
+## 프로젝트 커스터마이즈
+
+두 백엔드 모두 에이전트가 해당 디렉토리에서 시작되는 즉시 프로젝트별 컨벤션을 자동으로 픽업합니다. 에이전트가 특정 레포 룰을 따르길 원한다면:
+
+- **Claude:** 레포 루트에 `CLAUDE.md` 두기 (프로젝트 어디든 OK — Claude가 부모를 walk-up 합니다). Skills는 `.claude/skills/`, sub-agents는 `.claude/agents/`, 커스텀 슬래시 커맨드는 `.claude/commands/`. 설정은 `.claude/settings.json` (커밋용) 또는 `.claude/settings.local.json` (clone별).
+- **Codex:** 레포 루트에 `AGENTS.md`. Skills는 `.agents/skills/`. 프로젝트 `.codex/config.toml` (MCP 서버, hooks 등)과 `.codex/agents/`는 위에 설명한 trust 동의 후 로드됩니다.
+
 ## 개발
 
 ```bash
-# 의존성 설치
-npm install
+npm install                # 의존성 설치
+npm run dev                # 개발 모드 실행
+npm run build              # 프로덕션 빌드
+npm run make               # 앱 패키징
 
-# 개발 모드로 실행
-npm run dev
-
-# 프로덕션 빌드
-npm run build
-
-# 앱 패키징
-npm run make
+# 에이전트 런타임 smoke 테스트
+npm run smoke:mcp          # HTTP MCP 브리지
 ```
 
 ## 자동 업데이트
