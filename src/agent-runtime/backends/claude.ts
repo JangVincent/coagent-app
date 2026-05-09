@@ -1,5 +1,4 @@
 import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import { z } from "zod";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -17,6 +16,14 @@ import {
   type TurnRequest,
 } from "./types.ts";
 import { accumulateModelUsage, formatUsage } from "../helpers/usage.ts";
+import {
+  GET_PARTICIPANTS_DESCRIPTION,
+  GET_PARTICIPANTS_INPUT_SHAPE,
+  SEND_CHAT_DESCRIPTION,
+  SEND_CHAT_INPUT_SHAPE,
+  makeGetParticipantsHandler,
+  makeSendChatHandler,
+} from "../mcp/chat-tools.ts";
 
 // SDK 0.2.x defaults to "isolation mode" which silently skips CLAUDE.md,
 // .claude/skills, .claude/agents, .claude/commands, hooks, and settings.
@@ -94,35 +101,19 @@ export function createClaudeBackend(opts: ClaudeBackendOptions): AgentBackend {
   let totalCost = 0;
   let totalTurns = 0;
 
+  const toolDeps = { agentName: opts.agentName, bridge: opts.bridge };
   const sendChatTool = tool(
     "send_chat",
-    "Send a message to the group chat. Use @name to address a participant. This is the ONLY way to deliver a message to other participants — anything else you output stays local.",
-    {
-      content: z.string().describe(
-        "Message text. Use @name to mention participants. For file references, just write the path.",
-      ),
-    },
-    async ({ content }) => {
-      opts.bridge.sendChatMessage(content);
-      process.stdout.write(`[${opts.agentName} -> chat] ${content}\n`);
-      return { content: [{ type: "text" as const, text: "sent" }] };
-    },
+    SEND_CHAT_DESCRIPTION,
+    SEND_CHAT_INPUT_SHAPE,
+    makeSendChatHandler(toolDeps),
   );
-
   const getParticipantsTool = tool(
     "get_participants",
-    "Get the current list of participants in the chat room. Returns names and roles (human/agent).",
-    {},
-    async () => {
-      const roster = opts.bridge.getRoster();
-      const list =
-        roster.length > 0
-          ? roster.map((p) => `${p.name} (${p.role})`).join(", ")
-          : "(no participants)";
-      return { content: [{ type: "text" as const, text: list }] };
-    },
+    GET_PARTICIPANTS_DESCRIPTION,
+    GET_PARTICIPANTS_INPUT_SHAPE,
+    makeGetParticipantsHandler(toolDeps),
   );
-
   const chatServer = createSdkMcpServer({
     name: "agent-chat",
     version: "1.0.0",

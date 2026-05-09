@@ -23,7 +23,8 @@
     "node": ">=20"
   },
   "scripts": {
-    "build:agent": "esbuild src/agent-runtime/entry.ts --bundle --platform=node --format=cjs --outfile=dist/agent-runtime/entry.cjs --external:@anthropic-ai/claude-agent-sdk --external:ws --external:zod",
+    "build:agent": "esbuild src/agent-runtime/entry.ts --bundle --platform=node --format=cjs --outfile=dist/agent-runtime/entry.cjs --external:@anthropic-ai/claude-agent-sdk --external:@modelcontextprotocol/sdk --external:ws --external:zod",
+    "smoke:mcp": "esbuild scripts/smoke-mcp-http.ts --bundle --platform=node --format=cjs --external:@modelcontextprotocol/sdk --external:zod --outfile=dist/smoke-mcp-http.cjs && node dist/smoke-mcp-http.cjs",
     "dev": "npm run build:agent && electron-vite dev",
     "build": "npm run build:agent && electron-vite build",
     "preview": "electron-vite preview",
