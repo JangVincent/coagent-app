@@ -9,7 +9,7 @@
   import { reconnectWithName } from "../lib/ws-client.ts";
   import ActivityBadge from "./ActivityBadge.svelte";
   import AddAgentDialog from "./AddAgentDialog.svelte";
-  import type { EffortLevel } from "@shared/types.ts";
+  import type { BackendKind, EffortLevel } from "@shared/types.ts";
   import { DEFAULT_ROOM } from "@shared/protocol.ts";
 
   let showNewRoom = $state(false);
@@ -110,6 +110,7 @@
   async function handleAddAgent(opts: {
     name: string;
     cwd: string;
+    kind: BackendKind;
     model?: string;
     effort: EffortLevel;
     resumeSessionId?: string;
@@ -117,12 +118,21 @@
     showAddDialog = false;
     const room = addTargetRoom;
     ensureRoom(room);
-    addAgent({ name: opts.name, cwd: opts.cwd, room, model: opts.model, effort: opts.effort, status: "starting" });
+    addAgent({
+      name: opts.name,
+      cwd: opts.cwd,
+      room,
+      kind: opts.kind,
+      model: opts.model,
+      effort: opts.effort,
+      status: "starting",
+    });
     openTab(room);
     const res = await window.coagent.spawnAgent({
       name: opts.name,
       cwd: opts.cwd,
       room,
+      kind: opts.kind,
       model: opts.model,
       effort: opts.effort,
       resumeSessionId: opts.resumeSessionId,

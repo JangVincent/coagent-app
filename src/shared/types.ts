@@ -1,9 +1,12 @@
 // Shared types used by both main process and renderer
 
+export type BackendKind = "claude" | "codex";
+
 export interface AgentSpec {
   name: string;
   cwd: string;
   room: string;
+  kind: BackendKind;
   model?: string;
   effort?: EffortLevel;
   status: "starting" | "running" | "exited";
@@ -28,6 +31,7 @@ export interface SpawnAgentOpts {
   name: string;
   cwd: string;
   room: string;
+  kind?: BackendKind;
   model?: string;
   effort?: EffortLevel;
   resumeSessionId?: string;

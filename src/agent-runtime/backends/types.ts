@@ -9,6 +9,10 @@ export type ActivityCallback = (kind: ActivityKind, tool?: string) => void;
 export type SessionCallback = (sessionId: string) => void;
 
 export interface BackendCapabilities {
+  /** Human-facing label for the backend, used in intro/system messages. */
+  kindLabel: string;
+  /** Exact name of the chat-delivery tool as visible to the model. */
+  chatToolName: string;
   compact: boolean;
   usage: boolean;
   effort: boolean;

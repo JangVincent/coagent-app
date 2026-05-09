@@ -141,6 +141,8 @@ export function createClaudeBackend(opts: ClaudeBackendOptions): AgentBackend {
   }
 
   const capabilities: BackendCapabilities = {
+    kindLabel: "Claude Code",
+    chatToolName: "send_chat",
     compact: true,
     usage: true,
     effort: true,

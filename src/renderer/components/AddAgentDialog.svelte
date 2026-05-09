@@ -1,11 +1,12 @@
 <script lang="ts">
-  import type { EffortLevel, PastSession } from "@shared/types.ts";
+  import type { BackendKind, EffortLevel, PastSession } from "@shared/types.ts";
 
   let { roomId, onConfirm, onCancel }: {
     roomId: string;
     onConfirm: (opts: {
       name: string;
       cwd: string;
+      kind: BackendKind;
       model?: string;
       effort: EffortLevel;
       resumeSessionId?: string;
@@ -15,18 +16,31 @@
 
   let cwd = $state("");
   let name = $state("");
+  let kind = $state<BackendKind>("claude");
   let model = $state("");
   let effort = $state<EffortLevel>("xhigh");
   let sessions = $state<PastSession[]>([]);
   let selectedSession = $state<string | "fresh">("fresh");
   let step = $state<"config" | "session">("config");
 
-  const models = [
+  const claudeModels = [
     { id: "", label: "Default" },
     { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
     { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
     { id: "claude-opus-4-7", label: "Opus 4.7" },
   ];
+
+  const codexModels = [
+    { id: "", label: "Default" },
+    { id: "gpt-5-codex", label: "GPT-5 Codex" },
+    { id: "gpt-5", label: "GPT-5" },
+  ];
+
+  // Reset model when switching backends so a stale Claude/Codex id doesn't carry over.
+  $effect(() => {
+    void kind;
+    model = "";
+  });
 
   const efforts: { id: EffortLevel; label: string; desc: string }[] = [
     { id: "low", label: "Low", desc: "Fast, efficient" },
@@ -46,6 +60,11 @@
 
   async function handleNext() {
     if (!cwd || !name.trim()) return;
+    // Codex resume isn't wired yet — always go straight to spawn.
+    if (kind === "codex") {
+      doConfirm(undefined);
+      return;
+    }
     const { sessions: found } = await window.coagent.listSessions(cwd);
     if (found.length > 0) {
       sessions = found;
@@ -59,6 +78,7 @@
     onConfirm({
       name: name.trim(),
       cwd,
+      kind,
       model: model || undefined,
       effort,
       resumeSessionId,
@@ -118,29 +138,56 @@
           />
         </div>
 
+        <div class="field">
+          <span class="field-label">Backend</span>
+          <div class="kind-row">
+            <label class="kind-option" class:selected={kind === "claude"}>
+              <input type="radio" name="kind" value="claude" bind:group={kind} />
+              <span>Claude</span>
+            </label>
+            <label class="kind-option" class:selected={kind === "codex"}>
+              <input type="radio" name="kind" value="codex" bind:group={kind} />
+              <span>Codex</span>
+            </label>
+          </div>
+        </div>
+
         <div class="field-row-2">
           <div class="field">
             <label class="field-label" for="model-select">Model</label>
             <select id="model-select" class="field-select" bind:value={model}>
-              {#each models as m}
+              {#each (kind === "codex" ? codexModels : claudeModels) as m}
                 <option value={m.id}>{m.label}</option>
               {/each}
             </select>
           </div>
 
-          <div class="field">
-            <label class="field-label" for="effort-select">Effort</label>
-            <select id="effort-select" class="field-select" bind:value={effort}>
-              {#each efforts as e}
-                <option value={e.id}>{e.label}</option>
-              {/each}
-            </select>
-          </div>
+          {#if kind === "claude"}
+            <div class="field">
+              <label class="field-label" for="effort-select">Effort</label>
+              <select id="effort-select" class="field-select" bind:value={effort}>
+                {#each efforts as e}
+                  <option value={e.id}>{e.label}</option>
+                {/each}
+              </select>
+            </div>
+          {:else}
+            <div class="field">
+              <span class="field-label">Effort</span>
+              <div class="field-na">— not used by Codex</div>
+            </div>
+          {/if}
         </div>
 
-        <div class="effort-hint">
-          {efforts.find(e => e.id === effort)?.desc ?? ""}
-        </div>
+        {#if kind === "claude"}
+          <div class="effort-hint">
+            {efforts.find(e => e.id === effort)?.desc ?? ""}
+          </div>
+        {:else}
+          <div class="effort-hint">
+            Codex requires `codex login` (run once in a terminal).
+          </div>
+        {/if}
       </div>
 
       <div class="dialog-footer">
@@ -339,6 +386,64 @@
     color: var(--text-4);
     text-align: center;
     padding: 4px 0 0;
+  }
+
+  .kind-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .kind-option {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-3);
+    border: 1px solid var(--line-2);
+    border-radius: var(--r);
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    cursor: pointer;
+    transition: all var(--t-fast) var(--ease);
+  }
+  .kind-option:hover {
+    border-color: var(--line-3);
+    color: var(--text-1);
+  }
+  .kind-option.selected {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--text-1);
+  }
+  .kind-option input {
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 1.5px solid var(--line-3);
+    flex-shrink: 0;
+    position: relative;
+  }
+  .kind-option.selected input { border-color: var(--accent); }
+  .kind-option.selected input::after {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .field-na {
+    height: 34px;
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    font-family: var(--font-mono);
+    font-size: var(--fs-cap);
+    color: var(--text-4);
+    border: 1px dashed var(--line-2);
+    border-radius: var(--r);
   }
 
   .session-list {

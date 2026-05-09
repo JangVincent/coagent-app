@@ -21,6 +21,7 @@ import {
   type PermissionMode,
 } from "./backends/types.ts";
 import { createClaudeBackend } from "./backends/claude.ts";
+import { createCodexBackend } from "./backends/codex.ts";
 
 const args = process.argv.slice(2);
 
@@ -104,18 +105,38 @@ const bridge = createHubBridge({
   getRoster: () => roster,
 });
 
-let backend: AgentBackend;
-if (backendKind === "claude") {
-  backend = createClaudeBackend({
-    agentName: name!,
-    cwd,
-    initialModel,
-    initialEffort,
-    initialPermissionMode,
-    initialSessionId,
-    bridge,
-  });
-} else {
+// Backend is created asynchronously (Codex starts an HTTP MCP server).
+// All references in helpers below assume initialization is complete before
+// any WebSocket message arrives — connect() is only called after init.
+let backend!: AgentBackend;
+
+async function initBackend(): Promise<AgentBackend> {
+  if (backendKind === "claude") {
+    return createClaudeBackend({
+      agentName: name!,
+      cwd,
+      initialModel,
+      initialEffort,
+      initialPermissionMode,
+      initialSessionId,
+      bridge,
+    });
+  }
+  if (backendKind === "codex") {
+    if (initialSessionId) {
+      console.warn(`[${name}] codex backend ignores RESUME_SESSION_ID for now (PoC)`);
+    }
+    if (initialEffort) {
+      console.warn(`[${name}] codex backend has no effort concept; ignoring '${initialEffort}'`);
+    }
+    return createCodexBackend({
+      agentName: name!,
+      cwd,
+      initialModel,
+      initialPermissionMode,
+      bridge,
+    });
+  }
   console.error(`[${name}] unsupported backend '${backendKind}'`);
   process.exit(1);
 }
@@ -342,15 +363,16 @@ async function processQueue() {
   const batch = queue.splice(0, queue.length);
   let header = "";
   if (!introSent) {
+    const { kindLabel, chatToolName } = backend.capabilities;
     if (initialSessionId && backend.getSessionId() === initialSessionId) {
       // Resumed session: keep it short. The previous session has the full
-      // instructions; just refresh the send_chat reminder.
+      // instructions; just refresh the chat-tool reminder.
       header =
-        `You are "${name!}", a Claude Code agent (cwd: ${cwd}). ` +
+        `You are "${name!}", a ${kindLabel} agent (cwd: ${cwd}). ` +
         `You are resuming a previous session. ` +
-        `IMPORTANT: use the send_chat tool to reply — plain text is silently dropped.\n\n`;
+        `IMPORTANT: use the ${chatToolName} tool to reply — plain text is silently dropped.\n\n`;
     } else {
-      header = makeIntro(name!, cwd, roster) + "\n\n";
+      header = makeIntro(name!, cwd, roster, { kindLabel, chatTool: chatToolName }) + "\n\n";
     }
     introSent = true;
   }
@@ -488,7 +510,15 @@ function connect() {
   });
 }
 
-connect();
+initBackend()
+  .then((b) => {
+    backend = b;
+    connect();
+  })
+  .catch((e) => {
+    console.error(`[${name}] backend init failed:`, e);
+    process.exit(1);
+  });
 
 function shutdown(signal: NodeJS.Signals) {
   if (shuttingDown) process.exit(130);

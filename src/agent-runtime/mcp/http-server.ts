@@ -58,6 +58,12 @@ export async function startChatMcpHttpServer(
   await server.connect(transport);
 
   const httpServer = http.createServer(async (req, res) => {
+    const dbg = process.env.COAGENT_MCP_DEBUG === "1";
+    if (dbg) {
+      console.error(
+        `[mcp-http] ${req.method} ${req.url} auth=${req.headers.authorization ? "present" : "missing"}`,
+      );
+    }
     if (!req.url || !req.url.startsWith(MCP_PATH)) {
       res.statusCode = 404;
       res.end("not found");
@@ -65,6 +71,9 @@ export async function startChatMcpHttpServer(
     }
     const auth = req.headers.authorization;
     if (auth !== `Bearer ${bearerToken}`) {
+      if (dbg) {
+        console.error(`[mcp-http] 401: got "${auth ?? "(none)"}", expected "Bearer ${bearerToken.slice(0, 8)}…"`);
+      }
       res.statusCode = 401;
       res.setHeader("WWW-Authenticate", "Bearer");
       res.end("unauthorized");

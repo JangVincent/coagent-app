@@ -31,7 +31,13 @@ module.exports = {
     // the wrapper package and whichever platform binary npm installed on
     // the current build host.
     asar: {
-      unpack: "**/node_modules/@anthropic-ai/claude-agent-sdk*/**",
+      // Both Claude (claude-agent-sdk-*) and Codex (@openai/codex-*)
+      // ship platform-specific native binaries via optionalDependencies.
+      // The OS can't exec files inside asar, so any wrapper or per-platform
+      // package must be unpacked. The wildcards cover both the wrapper
+      // packages and whichever platform binary npm installed on the build host.
+      unpack:
+        "{**/node_modules/@anthropic-ai/claude-agent-sdk*/**,**/node_modules/@openai/codex*/**}",
     },
     // We build with electron-vite (npm run build) before forge packages,
     // so exclude source/config so the .asar only ships compiled output.
