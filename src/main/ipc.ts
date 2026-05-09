@@ -4,6 +4,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { listClaudeSessions } from "./sessions.ts";
 import { spawnAgent, killAgent, listAgents, renameAgent, setAgentSessionId } from "./agent-manager.ts";
+import { getProjectTrust, trustProject } from "./codex-trust.ts";
 
 // Lazy: app.getPath("userData") must be called after app.whenReady()
 function configPath() {
@@ -80,5 +81,13 @@ export function registerIpc(hubPort: number) {
   ipcMain.handle("agent:set-session-id", (_e, { name, sessionId }: { name: string; sessionId: string }) => {
     setAgentSessionId(name, sessionId);
     return { ok: true };
+  });
+
+  ipcMain.handle("codex:check-trust", async (_e, { projectPath }: { projectPath: string }) => {
+    return { status: await getProjectTrust(projectPath) };
+  });
+
+  ipcMain.handle("codex:trust", async (_e, { projectPath }: { projectPath: string }) => {
+    return trustProject(projectPath);
   });
 }

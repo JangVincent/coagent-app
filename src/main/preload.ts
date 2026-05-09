@@ -25,6 +25,11 @@ const api: CoagentAPI = {
     ipcRenderer.on("agent:log", handler);
     return () => ipcRenderer.off("agent:log", handler);
   },
+
+  checkCodexTrust: (projectPath: string) =>
+    ipcRenderer.invoke("codex:check-trust", { projectPath }),
+  trustCodexProject: (projectPath: string) =>
+    ipcRenderer.invoke("codex:trust", { projectPath }),
 };
 
 contextBridge.exposeInMainWorld("coagent", api);

@@ -55,7 +55,11 @@ export const BACKEND_CAPS: Record<BackendKind, BackendUiCaps> = {
   codex: {
     compact: false,
     usage: false,
-    effort: false,
+    // Codex exposes reasoning depth via `-c model_reasoning_effort=...`.
+    // Valid backend values are none|minimal|low|medium|high|xhigh, but
+    // `minimal` and `none` 400 against codex's built-in image_gen / web_search
+    // tools — we expose only the safe subset.
+    effort: true,
     model: true,
     // Codex auto-rejects MCP tool calls under any approval_policy; we
     // always pass --dangerously-bypass-approvals-and-sandbox so the chat
@@ -66,7 +70,12 @@ export const BACKEND_CAPS: Record<BackendKind, BackendUiCaps> = {
       { id: "gpt-5-codex", label: "GPT-5 Codex (API key only)" },
       { id: "gpt-5", label: "GPT-5" },
     ],
-    efforts: [],
+    efforts: [
+      { id: "low", label: "Low", desc: "Fast, efficient" },
+      { id: "medium", label: "Medium", desc: "Balanced" },
+      { id: "high", label: "High", desc: "Default quality" },
+      { id: "xhigh", label: "XHigh", desc: "Extended reasoning" },
+    ],
   },
 };
 

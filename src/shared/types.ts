@@ -37,6 +37,8 @@ export interface SpawnAgentOpts {
   resumeSessionId?: string;
 }
 
+export type CodexTrustStatus = "trusted" | "untrusted" | "unset";
+
 export interface CoagentAPI {
   getHubPort(): Promise<{ port: number }>;
   getSelfName(): Promise<{ name: string }>;
@@ -55,4 +57,15 @@ export interface CoagentAPI {
   onAgentLog(
     cb: (data: { name: string; stream: "stdout" | "stderr"; line: string }) => void,
   ): () => void;
+
+  /** Read project trust status from ~/.codex/config.toml. */
+  checkCodexTrust(projectPath: string): Promise<{ status: CodexTrustStatus }>;
+  /**
+   * Append `[projects."<path>"] trust_level = "trusted"` to ~/.codex/config.toml.
+   * Refuses (returns ok=false) if the project is already explicitly marked
+   * "untrusted" — coagent never silently overrides an explicit user choice.
+   */
+  trustCodexProject(
+    projectPath: string,
+  ): Promise<{ ok: boolean; status: CodexTrustStatus; error?: string }>;
 }

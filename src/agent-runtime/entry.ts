@@ -126,13 +126,18 @@ async function initBackend(): Promise<AgentBackend> {
     if (initialSessionId) {
       console.warn(`[${name}] codex backend ignores RESUME_SESSION_ID for now (PoC)`);
     }
-    if (initialEffort) {
-      console.warn(`[${name}] codex backend has no effort concept; ignoring '${initialEffort}'`);
+    // Codex effort range overlaps Claude's at low|medium|high|xhigh; "max"
+    // is Claude-only and won't be honored by codex's model_reasoning_effort.
+    const codexEffort =
+      initialEffort && initialEffort !== "max" ? initialEffort : undefined;
+    if (initialEffort === "max") {
+      console.warn(`[${name}] codex has no 'max' effort; falling back to default`);
     }
     return createCodexBackend({
       agentName: name!,
       cwd,
       initialModel,
+      initialEffort: codexEffort,
       bridge,
     });
   }

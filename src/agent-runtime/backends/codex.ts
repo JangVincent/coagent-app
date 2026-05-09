@@ -44,6 +44,9 @@ function resolveCodexBinary(): string | undefined {
 
 const KILL_GRACE_MS = 1500;
 
+export type CodexEffort = "low" | "medium" | "high" | "xhigh";
+const CODEX_EFFORTS: CodexEffort[] = ["low", "medium", "high", "xhigh"];
+
 // Walk a codex event/error payload and surface the deepest human-readable
 // `message` field. Codex wraps API errors as
 // `{type:"error",status:400,error:{type:"invalid_request_error",message:"..."}}`
@@ -72,6 +75,7 @@ export interface CodexBackendOptions {
   agentName: string;
   cwd: string;
   initialModel?: string;
+  initialEffort?: CodexEffort;
   bridge: HubChatBridge;
 }
 
@@ -118,6 +122,11 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
 
   let sessionId: string | null = null;
   let model: string | undefined = opts.initialModel;
+  // Codex's reasoning effort knob — valid values are
+  // none | minimal | low | medium | high | xhigh, but we expose only the
+  // safe range (low..xhigh) since `minimal` and `none` conflict with
+  // codex's built-in image_gen / web_search tools (HTTP 400 at the API).
+  let effort: CodexEffort | undefined = opts.initialEffort;
   let totalTurns = 0;
 
   function buildArgs(resumeSid: string | null): string[] {
@@ -141,6 +150,7 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
       `mcp_servers.coagent_chat.url="${mcp.url}"`,
       "-c",
       `mcp_servers.coagent_chat.bearer_token_env_var="COAGENT_MCP_TOKEN"`,
+      ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
       ...(model ? ["--model", model] : []),
     ];
 
@@ -310,7 +320,10 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
     chatToolName: "mcp__coagent_chat__send_chat",
     compact: false,
     usage: false,
-    effort: false,
+    // Codex exposes reasoning depth via `-c model_reasoning_effort=...`,
+    // which works for both `exec` and `exec resume`. We accept the same
+    // 4 levels the renderer's effort menu uses.
+    effort: true,
     model: true,
     // Codex auto-rejects MCP tool calls under any approval_policy except via
     // --dangerously-bypass-approvals-and-sandbox (openai/codex#15437). We
@@ -340,6 +353,26 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
       };
     },
 
+    setEffort(value: string | undefined): ControlResult {
+      const prev = effort ?? "(codex default)";
+      if (!value || value === "default" || value === "clear" || value === "reset") {
+        effort = undefined;
+        return {
+          ok: true,
+          info: `${prev} → (codex default) (applies to next turn)`,
+        };
+      }
+      const v = value.toLowerCase() as CodexEffort;
+      if (!CODEX_EFFORTS.includes(v)) {
+        return {
+          ok: false,
+          info: `invalid effort '${value}' for codex — use: ${CODEX_EFFORTS.join(", ")}`,
+        };
+      }
+      effort = v;
+      return { ok: true, info: `${prev} → ${effort} (applies to next turn)` };
+    },
+
     // setMode intentionally omitted — see capabilities.mode comment above.
 
     getSessionId() {
@@ -352,7 +385,7 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
     status(): BackendStatus {
       return {
         model: model ?? "(codex default)",
-        effort: "(n/a)",
+        effort: effort ?? "(codex default)",
         // Always bypass — see capabilities.mode comment for why this isn't
         // user-tunable yet.
         mode: "bypass-approvals-and-sandbox (forced)",

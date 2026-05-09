@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { BackendKind, EffortLevel, PastSession } from "@shared/types.ts";
+  import type { BackendKind, CodexTrustStatus, EffortLevel, PastSession } from "@shared/types.ts";
   import { capsFor } from "../lib/backend-caps.ts";
 
   let { roomId, onConfirm, onCancel }: {
@@ -24,12 +24,41 @@
   let selectedSession = $state<string | "fresh">("fresh");
   let step = $state<"config" | "session">("config");
 
+  // Codex trust state for the selected directory. `null` means we haven't
+  // checked yet (still loading or kind != codex).
+  let trustStatus = $state<CodexTrustStatus | null>(null);
+  let trustOptIn = $state(false);
+  let trustError = $state<string | null>(null);
+
   let caps = $derived(capsFor(kind));
 
   // Reset model when switching backends so a stale Claude/Codex id doesn't carry over.
   $effect(() => {
     void kind;
     model = "";
+  });
+
+  // Re-check codex trust whenever the user changes backend or directory.
+  $effect(() => {
+    if (kind !== "codex" || !cwd) {
+      trustStatus = null;
+      trustOptIn = false;
+      trustError = null;
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const r = await window.coagent.checkCodexTrust(cwd);
+      if (cancelled) return;
+      trustStatus = r.status;
+      // Default the opt-in to ON when status is unset — most users adding
+      // a Codex agent in their project want full layer support. They can
+      // uncheck if they prefer to set this manually later.
+      trustOptIn = r.status === "unset";
+    })();
+    return () => {
+      cancelled = true;
+    };
   });
 
   async function pickDirectory() {
@@ -44,6 +73,19 @@
     if (!cwd || !name.trim()) return;
     // Codex resume isn't wired yet — always go straight to spawn.
     if (kind === "codex") {
+      // Apply trust opt-in before spawning. If it fails (e.g. project is
+      // explicitly untrusted), surface the error and stop — let the user
+      // fix it manually rather than silently proceeding.
+      if (trustOptIn && trustStatus === "unset") {
+        const r = await window.coagent.trustCodexProject(cwd);
+        if (!r.ok) {
+          trustError = r.error ?? "failed to update ~/.codex/config.toml";
+          trustStatus = r.status;
+          return;
+        }
+        trustStatus = r.status;
+        trustError = null;
+      }
       doConfirm(undefined);
       return;
     }
@@ -165,10 +207,40 @@
           <div class="effort-hint">
             {caps.efforts.find(e => e.id === effort)?.desc ?? ""}
           </div>
-        {:else if kind === "codex"}
-          <div class="effort-hint">
-            Codex requires `codex login` first. Available models depend on your auth (ChatGPT subscription vs API key).
+        {/if}
+
+        {#if kind === "codex"}
+          <div class="codex-hint">
+            Codex requires <code>codex login</code> first. Available models depend on your auth (ChatGPT subscription vs API key).
           </div>
+          {#if cwd && trustStatus === "trusted"}
+            <div class="trust-row trust-ok">
+              <span class="trust-icon">✓</span>
+              <span>Project trusted — <code>.codex/config.toml</code>, hooks, and project subagents will load.</span>
+            </div>
+          {:else if cwd && trustStatus === "untrusted"}
+            <div class="trust-row trust-err">
+              <span class="trust-icon">✕</span>
+              <span>This path is explicitly marked <em>untrusted</em> in <code>~/.codex/config.toml</code>. Edit that file manually to flip it.</span>
+            </div>
+          {:else if cwd && trustStatus === "unset"}
+            <label class="trust-row trust-toggle">
+              <input type="checkbox" bind:checked={trustOptIn} />
+              <span class="trust-text">
+                <span class="trust-title">Trust this project</span>
+                <span class="trust-detail">
+                  Adds <code>[projects.&quot;{cwd}&quot;]</code> with <code>trust_level = "trusted"</code> to <code>~/.codex/config.toml</code>
+                  so codex loads project-scoped <code>.codex/config.toml</code>, hooks, and subagents.
+                </span>
+              </span>
+            </label>
+          {/if}
+          {#if trustError}
+            <div class="trust-row trust-err">
+              <span class="trust-icon">✕</span>
+              <span>{trustError}</span>
+            </div>
+          {/if}
         {/if}
       </div>
 
@@ -426,6 +498,101 @@
     color: var(--text-4);
     border: 1px dashed var(--line-2);
     border-radius: var(--r);
+  }
+
+  .codex-hint {
+    font-family: var(--font-sans);
+    font-size: var(--fs-cap);
+    color: var(--text-3);
+    line-height: 1.45;
+  }
+  .codex-hint code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    color: var(--text-2);
+    background: var(--bg-3);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+
+  .trust-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: var(--r);
+    font-family: var(--font-sans);
+    font-size: var(--fs-cap);
+    line-height: 1.45;
+    border: 1px solid var(--line-2);
+    background: var(--bg-3);
+  }
+  .trust-row code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    color: var(--text-2);
+    background: var(--bg-4);
+    padding: 1px 4px;
+    border-radius: 3px;
+    word-break: break-all;
+  }
+  .trust-icon {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .trust-ok { color: var(--text-2); border-color: var(--line-3); }
+  .trust-ok .trust-icon { color: var(--accent); }
+  .trust-err { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+  .trust-err .trust-icon { color: var(--danger); }
+
+  .trust-toggle {
+    cursor: pointer;
+    transition: border-color var(--t-fast) var(--ease);
+  }
+  .trust-toggle:hover { border-color: var(--line-3); }
+  .trust-toggle input {
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border: 1.5px solid var(--line-3);
+    border-radius: 3px;
+    flex-shrink: 0;
+    margin-top: 1px;
+    cursor: pointer;
+    position: relative;
+    background: var(--bg-2);
+    transition: all var(--t-fast) var(--ease);
+  }
+  .trust-toggle input:checked {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .trust-toggle input:checked::after {
+    content: "✓";
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--bg-0);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .trust-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .trust-title {
+    color: var(--text-1);
+    font-weight: 500;
+  }
+  .trust-detail {
+    color: var(--text-3);
+    font-size: var(--fs-cap);
   }
 
   .session-list {
