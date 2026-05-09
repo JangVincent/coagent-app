@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { BackendKind, EffortLevel, PastSession } from "@shared/types.ts";
+  import { capsFor } from "../lib/backend-caps.ts";
 
   let { roomId, onConfirm, onCancel }: {
     roomId: string;
@@ -23,32 +24,13 @@
   let selectedSession = $state<string | "fresh">("fresh");
   let step = $state<"config" | "session">("config");
 
-  const claudeModels = [
-    { id: "", label: "Default" },
-    { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
-    { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
-    { id: "claude-opus-4-7", label: "Opus 4.7" },
-  ];
-
-  const codexModels = [
-    { id: "", label: "Default" },
-    { id: "gpt-5-codex", label: "GPT-5 Codex" },
-    { id: "gpt-5", label: "GPT-5" },
-  ];
+  let caps = $derived(capsFor(kind));
 
   // Reset model when switching backends so a stale Claude/Codex id doesn't carry over.
   $effect(() => {
     void kind;
     model = "";
   });
-
-  const efforts: { id: EffortLevel; label: string; desc: string }[] = [
-    { id: "low", label: "Low", desc: "Fast, efficient" },
-    { id: "medium", label: "Medium", desc: "Balanced" },
-    { id: "high", label: "High", desc: "Default quality" },
-    { id: "xhigh", label: "XHigh", desc: "Extended reasoning" },
-    { id: "max", label: "Max", desc: "Maximum capability" },
-  ];
 
   async function pickDirectory() {
     const result = await window.coagent.pickFolder();
@@ -156,17 +138,17 @@
           <div class="field">
             <label class="field-label" for="model-select">Model</label>
             <select id="model-select" class="field-select" bind:value={model}>
-              {#each (kind === "codex" ? codexModels : claudeModels) as m}
+              {#each caps.models as m}
                 <option value={m.id}>{m.label}</option>
               {/each}
             </select>
           </div>
 
-          {#if kind === "claude"}
+          {#if caps.effort}
             <div class="field">
               <label class="field-label" for="effort-select">Effort</label>
               <select id="effort-select" class="field-select" bind:value={effort}>
-                {#each efforts as e}
+                {#each caps.efforts as e}
                   <option value={e.id}>{e.label}</option>
                 {/each}
               </select>
@@ -174,18 +156,18 @@
           {:else}
             <div class="field">
               <span class="field-label">Effort</span>
-              <div class="field-na">— not used by Codex</div>
+              <div class="field-na">— not used by {kind === "codex" ? "Codex" : kind}</div>
             </div>
           {/if}
         </div>
 
-        {#if kind === "claude"}
+        {#if caps.effort}
           <div class="effort-hint">
-            {efforts.find(e => e.id === effort)?.desc ?? ""}
+            {caps.efforts.find(e => e.id === effort)?.desc ?? ""}
           </div>
-        {:else}
+        {:else if kind === "codex"}
           <div class="effort-hint">
-            Codex requires `codex login` (run once in a terminal).
+            Codex requires `codex login` first. Available models depend on your auth (ChatGPT subscription vs API key).
           </div>
         {/if}
       </div>

@@ -538,14 +538,14 @@
   .row-chevron-btn:hover { color: var(--text-1); }
   .row-chevron {
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: 13px;
     line-height: 1;
     color: inherit;
     display: inline-block;
-    width: 9px;
+    width: 13px;
     text-align: center;
   }
-  .row-chevron.danger { color: var(--danger); font-size: 11px; font-weight: 700; }
+  .row-chevron.danger { color: var(--danger); font-size: 13px; font-weight: 700; }
 
   .row-body {
     display: flex;

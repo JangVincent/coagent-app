@@ -1,5 +1,5 @@
 import http from "node:http";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -28,12 +28,10 @@ export interface StartChatMcpHttpServerOptions extends ChatToolDeps {
 
 const MCP_PATH = "/mcp";
 
-export async function startChatMcpHttpServer(
-  opts: StartChatMcpHttpServerOptions,
-): Promise<ChatMcpHttpServer> {
-  const host = opts.host ?? "127.0.0.1";
-  const bearerToken = randomBytes(24).toString("hex");
-
+// Build a fresh McpServer with chat tools registered. The deps closure
+// (in particular `bridge`) is shared across instances, so each request's
+// server forwards to the same hub-side state.
+function buildServer(deps: ChatToolDeps): McpServer {
   const server = new McpServer({ name: "agent-chat", version: "1.0.0" });
   server.registerTool(
     "send_chat",
@@ -41,7 +39,7 @@ export async function startChatMcpHttpServer(
       description: SEND_CHAT_DESCRIPTION,
       inputSchema: SEND_CHAT_INPUT_SHAPE,
     },
-    makeSendChatHandler({ agentName: opts.agentName, bridge: opts.bridge }),
+    makeSendChatHandler(deps),
   );
   server.registerTool(
     "get_participants",
@@ -49,13 +47,17 @@ export async function startChatMcpHttpServer(
       description: GET_PARTICIPANTS_DESCRIPTION,
       inputSchema: GET_PARTICIPANTS_INPUT_SHAPE,
     },
-    makeGetParticipantsHandler({ agentName: opts.agentName, bridge: opts.bridge }),
+    makeGetParticipantsHandler(deps),
   );
+  return server;
+}
 
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
-  await server.connect(transport);
+export async function startChatMcpHttpServer(
+  opts: StartChatMcpHttpServerOptions,
+): Promise<ChatMcpHttpServer> {
+  const host = opts.host ?? "127.0.0.1";
+  const bearerToken = randomBytes(24).toString("hex");
+  const deps: ChatToolDeps = { agentName: opts.agentName, bridge: opts.bridge };
 
   const httpServer = http.createServer(async (req, res) => {
     const dbg = process.env.COAGENT_MCP_DEBUG === "1";
@@ -72,13 +74,35 @@ export async function startChatMcpHttpServer(
     const auth = req.headers.authorization;
     if (auth !== `Bearer ${bearerToken}`) {
       if (dbg) {
-        console.error(`[mcp-http] 401: got "${auth ?? "(none)"}", expected "Bearer ${bearerToken.slice(0, 8)}…"`);
+        console.error(
+          `[mcp-http] 401: got "${auth ?? "(none)"}", expected "Bearer ${bearerToken.slice(0, 8)}…"`,
+        );
       }
       res.statusCode = 401;
       res.setHeader("WWW-Authenticate", "Bearer");
       res.end("unauthorized");
       return;
     }
+
+    // Stateless mode (per the @modelcontextprotocol/sdk simpleStatelessStreamableHttp
+    // example): each POST builds a fresh McpServer + transport, handles the
+    // request, then closes both. This lets `codex exec resume`, which spawns
+    // a brand-new codex process per turn, reconnect cleanly without needing
+    // session-id continuity from the previous turn's transport.
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.setHeader("Allow", "POST");
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Method not allowed." },
+          id: null,
+        }),
+      );
+      return;
+    }
+
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", async () => {
@@ -90,18 +114,47 @@ export async function startChatMcpHttpServer(
             body = JSON.parse(raw);
           } catch (e) {
             res.statusCode = 400;
-            res.end(`invalid json: ${(e as Error).message}`);
+            res.setHeader("Content-Type", "application/json");
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                error: { code: -32700, message: `Parse error: ${(e as Error).message}` },
+                id: null,
+              }),
+            );
             return;
           }
         }
       }
+
+      const server = buildServer(deps);
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
       try {
+        await server.connect(transport);
         await transport.handleRequest(req, res, body);
       } catch (e) {
+        if (dbg) console.error(`[mcp-http] handler error:`, e);
         if (!res.headersSent) {
           res.statusCode = 500;
-          res.end(String((e as Error).message ?? e));
+          res.setHeader("Content-Type", "application/json");
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              error: { code: -32603, message: String((e as Error).message ?? e) },
+              id: null,
+            }),
+          );
         }
+      } finally {
+        // Tear down per-request server/transport when the response closes.
+        const cleanup = () => {
+          transport.close().catch(() => {});
+          server.close().catch(() => {});
+        };
+        if (res.writableEnded) cleanup();
+        else res.on("close", cleanup);
       }
     });
     req.on("error", () => {
@@ -121,7 +174,9 @@ export async function startChatMcpHttpServer(
   });
   const addr = httpServer.address();
   const port =
-    addr && typeof addr === "object" && "port" in addr ? (addr as { port: number }).port : 0;
+    addr && typeof addr === "object" && "port" in addr
+      ? (addr as { port: number }).port
+      : 0;
   if (!port) throw new Error("failed to bind chat MCP HTTP server to a port");
 
   return {
@@ -129,9 +184,6 @@ export async function startChatMcpHttpServer(
     bearerToken,
     port,
     async close() {
-      try {
-        await server.close();
-      } catch {}
       await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     },
   };

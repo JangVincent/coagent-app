@@ -16,8 +16,11 @@
 
   import { sendControl } from "../lib/ws-client.ts";
   import { agents, setAgentPaused } from "../lib/stores/agents.ts";
+  import { capsFor } from "../lib/backend-caps.ts";
 
-  let paused = $derived($agents.find((a) => a.name === agentName)?.paused ?? false);
+  let agent = $derived($agents.find((a) => a.name === agentName));
+  let paused = $derived(agent?.paused ?? false);
+  let caps = $derived(capsFor(agent?.kind));
   let showModeMenu = $state(false);
   let showModelMenu = $state(false);
   let showEffortMenu = $state(false);
@@ -25,16 +28,38 @@
   let confirmClear = $state(false);
   let menu: HTMLElement;
 
-  // Clamp position so menu doesn't go off screen
-  const MENU_HEIGHT = 300;
+  // Initial position uses the click coords; the post-mount $effect below
+  // re-clamps using the actual rendered height so the menu never spills off
+  // the bottom (the main menu is ~360px tall — too long to estimate safely).
   const MENU_WIDTH = 200;
-  let left = $derived(Math.min(x, window.innerWidth - MENU_WIDTH - 8));
-  // Open above the cursor when near the bottom of the screen
-  let top = $derived(
-    y + MENU_HEIGHT > window.innerHeight
-      ? Math.max(8, y - MENU_HEIGHT)
-      : y
-  );
+  const VIEWPORT_PAD = 8;
+  let left = $state(Math.min(x, window.innerWidth - MENU_WIDTH - VIEWPORT_PAD));
+  let top = $state(y);
+
+  function reclamp() {
+    if (!menu) return;
+    const h = menu.offsetHeight;
+    const w = menu.offsetWidth;
+    const maxTop = window.innerHeight - h - VIEWPORT_PAD;
+    if (y + h + VIEWPORT_PAD > window.innerHeight) {
+      // Try to open above the cursor; if still off, pin to top with padding.
+      top = Math.max(VIEWPORT_PAD, Math.min(y - h, maxTop));
+    } else {
+      top = y;
+    }
+    left = Math.min(x, window.innerWidth - w - VIEWPORT_PAD);
+  }
+
+  // Re-measure when the visible content changes (submenu navigation, confirm
+  // sections) — the height shifts substantially between states.
+  $effect(() => {
+    void showModeMenu;
+    void showModelMenu;
+    void showEffortMenu;
+    void confirmKill;
+    void confirmClear;
+    queueMicrotask(reclamp);
+  });
 
   function send(op: string, arg?: string) {
     sendControl(agentName, op, arg);
@@ -74,21 +99,16 @@
     { value: "plan", label: "Plan" },
   ];
 
-  const models = [
+  // Submenu lists are derived from the per-backend caps map; the leading
+  // "Default" entry resets the override on the backend (sends `default`).
+  let modelOptions = $derived([
     { id: "default", label: "Default" },
-    { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
-    { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
-    { id: "claude-opus-4-7", label: "Opus 4.7" },
-  ];
-
-  const efforts = [
+    ...caps.models.filter((m) => m.id !== "").map((m) => ({ id: m.id, label: m.label })),
+  ]);
+  let effortOptions = $derived([
     { id: "default", label: "Default" },
-    { id: "low", label: "Low" },
-    { id: "medium", label: "Medium" },
-    { id: "high", label: "High" },
-    { id: "xhigh", label: "XHigh" },
-    { id: "max", label: "Max" },
-  ];
+    ...caps.efforts.map((e) => ({ id: e.id, label: e.label })),
+  ]);
 </script>
 
 <div class="menu" bind:this={menu} style:left="{left}px" style:top="{top}px" role="menu">
@@ -125,7 +145,7 @@
       Back
     </button>
     <div class="divider"></div>
-    {#each models as m}
+    {#each modelOptions as m}
       <button class="item" onclick={() => send("model", m.id)}>{m.label}</button>
     {/each}
   {:else if showEffortMenu}
@@ -134,7 +154,7 @@
       Back
     </button>
     <div class="divider"></div>
-    {#each efforts as e}
+    {#each effortOptions as e}
       <button class="item" onclick={() => send("effort", e.id)}>{e.label}</button>
     {/each}
   {:else}
@@ -143,24 +163,36 @@
     </button>
     <div class="divider"></div>
     <button class="item" onclick={() => send("status")}>/status</button>
-    <button class="item" onclick={() => send("usage")}>/usage</button>
-    <button class="item" onclick={() => send("compact")}>/compact</button>
+    {#if caps.usage}
+      <button class="item" onclick={() => send("usage")}>/usage</button>
+    {/if}
+    {#if caps.compact}
+      <button class="item" onclick={() => send("compact")}>/compact</button>
+    {/if}
     <button class="item" onclick={() => { confirmClear = true; }}>
       /clear session
     </button>
-    <div class="divider"></div>
-    <button class="item submenu" onclick={() => (showModeMenu = true)}>
-      Set mode
-      <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M2 1l4 3.5L2 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-    </button>
-    <button class="item submenu" onclick={() => (showModelMenu = true)}>
-      Set model
-      <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M2 1l4 3.5L2 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-    </button>
-    <button class="item submenu" onclick={() => (showEffortMenu = true)}>
-      Set effort
-      <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M2 1l4 3.5L2 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-    </button>
+    {#if caps.mode || caps.model || caps.effort}
+      <div class="divider"></div>
+      {#if caps.mode}
+        <button class="item submenu" onclick={() => (showModeMenu = true)}>
+          Set mode
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M2 1l4 3.5L2 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      {/if}
+      {#if caps.model}
+        <button class="item submenu" onclick={() => (showModelMenu = true)}>
+          Set model
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M2 1l4 3.5L2 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      {/if}
+      {#if caps.effort}
+        <button class="item submenu" onclick={() => (showEffortMenu = true)}>
+          Set effort
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none"><path d="M2 1l4 3.5L2 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      {/if}
+    {/if}
     <div class="divider"></div>
     <button class="item danger" onclick={() => { confirmKill = true; }}>/kill</button>
     <div class="divider"></div>
@@ -181,6 +213,10 @@
     display: flex;
     flex-direction: column;
     animation: menu-in 140ms var(--ease);
+    /* Cap height to viewport (with padding on both sides) so even on
+       short windows the menu stays usable; falls back to scrolling. */
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
   }
   @keyframes menu-in {
     from { opacity: 0; transform: translateY(-2px) scale(0.98); }

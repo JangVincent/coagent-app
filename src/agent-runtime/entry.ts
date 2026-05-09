@@ -133,7 +133,6 @@ async function initBackend(): Promise<AgentBackend> {
       agentName: name!,
       cwd,
       initialModel,
-      initialPermissionMode,
       bridge,
     });
   }
@@ -399,7 +398,7 @@ async function processQueue() {
           ws.send(
             encode({
               type: MSG.MESSAGE,
-              content: `_(session resume failed — starting fresh)_`,
+              content: `_(notice: session resume failed — starting fresh)_`,
             }),
           );
         }
@@ -419,7 +418,9 @@ async function processQueue() {
         bridge.sendChatMessage(outcome.resultText);
       } else {
         console.error(`[${name}] turn produced no output`);
-        bridge.sendChatMessage(`_(turn completed with no response — try again)_`);
+        // System-style notice (renderer styles `_(notice: …)_` differently
+        // from `_(error: …)_`).
+        bridge.sendChatMessage(`_(notice: turn completed with no response)_`);
       }
     }
   } catch (e: any) {

@@ -34,11 +34,23 @@
   {#each chatList as entry (entry.ts + entry.kind + ("from" in entry ? entry.from : "sys"))}
     {#if entry.kind === "chat"}
       {@const isMe = entry.from === $selfName}
-      {@const isAgentError = !isMe && /^\s*_\(.*\)_\s*$/.test(entry.content)}
-      {#if isAgentError}
+      {@const noticeMatch = !isMe ? entry.content.match(/^\s*_\((notice|error):\s*(.*)\)_\s*$/s) : null}
+      {@const legacyErrorMatch = !isMe && !noticeMatch ? entry.content.match(/^\s*_\((.*)\)_\s*$/s) : null}
+      {#if noticeMatch}
+        {@const noticeKind = noticeMatch[1]}
+        {@const noticeText = noticeMatch[2]}
+        {#if noticeKind === "notice"}
+          <div class="system-msg">— {entry.from}: {noticeText} —</div>
+        {:else}
+          <div class="error-notice">
+            <span class="error-notice-name" style:color={nameColor(entry.from)}>{entry.from}</span>
+            <span class="error-notice-text">{noticeText}</span>
+          </div>
+        {/if}
+      {:else if legacyErrorMatch}
         <div class="error-notice">
           <span class="error-notice-name" style:color={nameColor(entry.from)}>{entry.from}</span>
-          <span class="error-notice-text">{entry.content.replace(/^\s*_\(/, "").replace(/\)_\s*$/, "")}</span>
+          <span class="error-notice-text">{legacyErrorMatch[1]}</span>
         </div>
       {:else}
         <div class="msg-wrap" class:msg-wrap-me={isMe}>

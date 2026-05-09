@@ -64,7 +64,8 @@ async function main() {
     process.stderr.write(`[codex stderr] ${chunk.toString()}`);
   });
 
-  const prompt = `Call the tool named exactly "mcp__coagent_chat__send_chat" with arguments {"content":"probe-pass-from-codex"}. Then end the turn.`;
+  const prompt = process.env.PROBE_PROMPT
+    ?? `Call the tool named exactly "mcp__coagent_chat__send_chat" with arguments {"content":"probe-pass-from-codex"}. Then end the turn.`;
   child.stdin.write(prompt);
   child.stdin.end();
 
@@ -92,7 +93,10 @@ async function main() {
     } else if (event.type === "turn.completed") {
       console.log(`[codex] turn.completed usage=${JSON.stringify(event.usage)}`);
     } else if (event.type === "turn.failed" || event.type === "error") {
-      console.log(`[codex] FAILURE:`, JSON.stringify(event));
+      console.log(`[codex] FAILURE event:`, JSON.stringify(event, null, 2));
+    } else {
+      // dump unknown events to spot anything we miss
+      console.log(`[codex] event:`, event.type);
     }
   }
 

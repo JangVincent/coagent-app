@@ -72,8 +72,13 @@
     border-top: 1px solid var(--line-1);
     background: var(--bg-2);
     overflow-x: auto;
+    /* CSS spec: setting overflow-x to a non-visible value auto-promotes
+       overflow-y from visible to auto, which surfaces an unwanted
+       vertical scrollbar. Pin overflow-y to hidden to keep this row a
+       single-line horizontal scroller. */
+    overflow-y: hidden;
     flex-shrink: 0;
-    min-height: 34px;
+    height: 34px;
   }
 
   .tab {

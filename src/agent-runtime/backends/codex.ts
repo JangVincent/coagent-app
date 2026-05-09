@@ -7,9 +7,7 @@ import {
   type BackendCapabilities,
   type BackendStatus,
   type ControlResult,
-  type ControlRunCtx,
   type HubChatBridge,
-  type PermissionMode,
   type TurnOutcome,
   type TurnRequest,
 } from "./types.ts";
@@ -44,57 +42,36 @@ function resolveCodexBinary(): string | undefined {
   return undefined;
 }
 
-type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
-type CodexApproval = "untrusted" | "on-request" | "never";
-
-function approvalForMode(mode: PermissionMode): CodexApproval {
-  // Headless agent: never prompt for approval. Even "default" maps to
-  // "never" because the chat hub has no approval UX. Plan mode keeps
-  // approvals off but reduces sandbox to read-only below.
-  switch (mode) {
-    case "default":
-      return "on-request";
-    case "acceptEdits":
-      return "never";
-    case "bypassPermissions":
-      return "never";
-    case "plan":
-      return "never";
-  }
-}
-
-function sandboxForMode(mode: PermissionMode): CodexSandbox {
-  switch (mode) {
-    case "plan":
-      return "read-only";
-    case "default":
-    case "acceptEdits":
-    case "bypassPermissions":
-      return "workspace-write";
-  }
-}
-
-const MODE_ALIASES: Record<string, PermissionMode> = {
-  default: "default",
-  ask: "default",
-  normal: "default",
-  accept: "acceptEdits",
-  acceptedits: "acceptEdits",
-  acceptEdits: "acceptEdits",
-  edits: "acceptEdits",
-  bypass: "bypassPermissions",
-  bypassPermissions: "bypassPermissions",
-  auto: "bypassPermissions",
-  plan: "plan",
-};
-
 const KILL_GRACE_MS = 1500;
+
+// Walk a codex event/error payload and surface the deepest human-readable
+// `message` field. Codex wraps API errors as
+// `{type:"error",status:400,error:{type:"invalid_request_error",message:"..."}}`
+// and turn.failed sometimes carries the same shape one level deeper.
+function findDeepestMessage(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const obj = value as Record<string, unknown>;
+  // Prefer a nested error.message before the surface-level message — for
+  // codex's API errors the nested one is the user-facing text.
+  const nested = findDeepestMessage(obj.error);
+  if (nested) return nested;
+  if (typeof obj.message === "string" && obj.message.trim()) return obj.message;
+  return null;
+}
+
+function extractFailure(event: Record<string, unknown>, fallback: string): string {
+  const msg = findDeepestMessage(event);
+  if (msg) {
+    const status = typeof event.status === "number" ? ` (HTTP ${event.status})` : "";
+    return `${fallback}: ${msg}${status}`;
+  }
+  return `${fallback}: ${JSON.stringify(event)}`;
+}
 
 export interface CodexBackendOptions {
   agentName: string;
   cwd: string;
   initialModel?: string;
-  initialPermissionMode: PermissionMode;
   bridge: HubChatBridge;
 }
 
@@ -105,6 +82,9 @@ interface CodexEvent {
   usage?: { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number };
   message?: string;
   error?: string;
+  // turn.failed and error events have shifted shape across codex versions;
+  // we capture the whole object as a fallback for diagnostics.
+  [key: string]: unknown;
 }
 
 interface CodexItem {
@@ -138,39 +118,40 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
 
   let sessionId: string | null = null;
   let model: string | undefined = opts.initialModel;
-  let permissionMode: PermissionMode = opts.initialPermissionMode;
   let totalTurns = 0;
 
   function buildArgs(resumeSid: string | null): string[] {
-    const args = ["exec"];
-    if (resumeSid) {
-      args.push("resume", resumeSid);
-    }
-    // Read prompt from stdin to avoid argv size limits.
-    args.push("-");
     // Codex 0.130.x auto-rejects MCP tool calls under any approval_policy
     // value (incl. "never") in non-interactive mode (see openai/codex#15437).
     // The only way to let the agent invoke our send_chat tool is the full
     // bypass flag — same trust level as Claude's `bypassPermissions` mode.
-    // permissionMode and sandboxForMode() are kept for future versions of
-    // Codex that grow per-MCP allowlists.
-    args.push(
+    // Once codex grows a per-MCP allowlist this can become user-controllable
+    // (BackendCapabilities.mode = true again).
+
+    // `codex exec` and `codex exec resume` accept different flag sets.
+    // `resume` does NOT accept --cd or --sandbox: the cwd and sandbox
+    // policy are pinned to the original session. Options shared by both
+    // (--json, --skip-git-repo-check, --dangerously-bypass-…, -c, --model)
+    // are appended after positional args separately for each branch.
+    const sharedOpts = [
       "--json",
-      "--cd",
-      opts.cwd,
       "--skip-git-repo-check",
       "--dangerously-bypass-approvals-and-sandbox",
       "-c",
       `mcp_servers.coagent_chat.url="${mcp.url}"`,
       "-c",
       `mcp_servers.coagent_chat.bearer_token_env_var="COAGENT_MCP_TOKEN"`,
-    );
-    void approvalForMode;
-    void sandboxForMode;
-    if (model) {
-      args.push("--model", model);
+      ...(model ? ["--model", model] : []),
+    ];
+
+    if (resumeSid) {
+      // exec resume [OPTIONS] [SESSION_ID] [PROMPT]
+      // Read PROMPT from stdin via "-".
+      return ["exec", "resume", ...sharedOpts, resumeSid, "-"];
     }
-    return args;
+    // exec [OPTIONS] [PROMPT]
+    // Fresh session: also pin --cd to our project root.
+    return ["exec", ...sharedOpts, "--cd", opts.cwd, "-"];
   }
 
   function spawnCodex(args: string[], abort: AbortSignal): ChildProcess {
@@ -248,11 +229,16 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
       }
       case "turn.completed":
         return {};
-      case "turn.failed":
-        return { failure: event.message ?? "turn failed" };
-      case "error":
-        return { failure: event.message ?? event.error ?? "codex error" };
+      case "turn.failed": {
+        return { failure: extractFailure(event, "turn failed") };
+      }
+      case "error": {
+        return { failure: extractFailure(event, "codex error") };
+      }
       default:
+        if (process.env.COAGENT_CODEX_DEBUG === "1") {
+          process.stderr.write(`[codex event] ${JSON.stringify(event)}\n`);
+        }
         return {};
     }
   }
@@ -278,6 +264,7 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
     let failure: string | null = null;
     if (child.stdout) {
       const rl = readline.createInterface({ input: child.stdout });
+      const debug = process.env.COAGENT_CODEX_DEBUG === "1";
       for await (const line of rl) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -285,7 +272,11 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
         try {
           event = JSON.parse(trimmed) as CodexEvent;
         } catch {
+          if (debug) process.stderr.write(`[codex non-json] ${trimmed}\n`);
           continue;
+        }
+        if (debug) {
+          process.stderr.write(`[codex jsonl] ${trimmed}\n`);
         }
         const r = handleEvent(event, req.onActivity, req.onSessionId);
         if (r.resultText) resultText = r.resultText;
@@ -321,7 +312,12 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
     usage: false,
     effort: false,
     model: true,
-    mode: true,
+    // Codex auto-rejects MCP tool calls under any approval_policy except via
+    // --dangerously-bypass-approvals-and-sandbox (openai/codex#15437). We
+    // unconditionally pass that flag so send_chat works, which means any
+    // permission mode the user sets here would be silently ignored. Mark
+    // unsupported until codex grows a per-MCP allowlist.
+    mode: false,
   };
 
   return {
@@ -344,16 +340,7 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
       };
     },
 
-    setMode(value: string): ControlResult {
-      const resolved = MODE_ALIASES[value] ?? MODE_ALIASES[value.toLowerCase()];
-      if (!resolved) return { ok: false, info: `unknown mode '${value}'` };
-      const prev = permissionMode;
-      permissionMode = resolved;
-      return {
-        ok: true,
-        info: `${prev} → ${resolved} (sandbox=${sandboxForMode(resolved)}, approval=${approvalForMode(resolved)})`,
-      };
-    },
+    // setMode intentionally omitted — see capabilities.mode comment above.
 
     getSessionId() {
       return sessionId;
@@ -366,7 +353,9 @@ export async function createCodexBackend(opts: CodexBackendOptions): Promise<Age
       return {
         model: model ?? "(codex default)",
         effort: "(n/a)",
-        mode: `${permissionMode} (sandbox=${sandboxForMode(permissionMode)}, approval=${approvalForMode(permissionMode)})`,
+        // Always bypass — see capabilities.mode comment for why this isn't
+        // user-tunable yet.
+        mode: "bypass-approvals-and-sandbox (forced)",
         session: sessionId,
         extra: {
           turns: String(totalTurns),
