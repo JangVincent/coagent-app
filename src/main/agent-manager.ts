@@ -9,6 +9,10 @@ interface AgentHandle {
   spec: AgentSpec & { resumeSessionId?: string };
   proc: UtilityProcess;
   currentSessionId?: string; // Tracked via IPC from agent runtime
+  // Set during rename so the kill-triggered exit doesn't surface as a status
+  // change to the renderer (the agent isn't really exiting, just being
+  // respawned under a new name).
+  renaming?: boolean;
 }
 
 const agents = new Map<string, AgentHandle>();
@@ -99,8 +103,10 @@ export function spawnAgent(spec: {
   });
 
   proc.on("exit", (code) => {
+    const handle = agents.get(spec.name);
+    const suppress = handle?.renaming === true;
     agents.delete(spec.name);
-    onStatusChange?.(spec.name, "exited", code ?? undefined);
+    if (!suppress) onStatusChange?.(spec.name, "exited", code ?? undefined);
   });
 
   return { ok: true };
@@ -143,11 +149,19 @@ export function getAgentSessionId(name: string): string | undefined {
   return agents.get(name)?.currentSessionId;
 }
 
-/** Rename an agent by killing and respawning with the same session */
+/** Rename an agent by killing and respawning with the same session.
+ *
+ * Returns the final status of the new agent so the renderer can apply it
+ * synchronously after renaming its own store, avoiding a race where the
+ * `agent:status` event for the new name arrives before the renderer's store
+ * has an entry under that name (which would silently drop the status).
+ */
+const RENAME_SPAWN_AWAIT_TIMEOUT_MS = 5000;
+
 export async function renameAgent(
   oldName: string,
   newName: string,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; status?: AgentSpec["status"] }> {
   const h = agents.get(oldName);
   if (!h) return { ok: false, error: `agent '${oldName}' not found` };
   if (agents.has(newName)) return { ok: false, error: `name '${newName}' already taken` };
@@ -156,7 +170,10 @@ export async function renameAgent(
   const { cwd, room, kind, model, effort } = h.spec;
   const sessionId = h.currentSessionId;
 
-  // Kill the old agent and wait for it to exit
+  // Flag the old handle so the exit triggered by our kill doesn't surface
+  // as an "exited" status to the renderer. The renderer will see only the
+  // final rename result.
+  h.renaming = true;
   h.proc.kill();
   await new Promise<void>((resolve) => {
     const check = () => {
@@ -167,7 +184,7 @@ export async function renameAgent(
   });
 
   // Respawn with new name but same session
-  return spawnAgent({
+  const result = spawnAgent({
     name: newName,
     cwd,
     room,
@@ -176,4 +193,23 @@ export async function renameAgent(
     effort,
     resumeSessionId: sessionId,
   });
+  if (!result.ok) return result;
+
+  // Wait until the new proc either spawns (status becomes "running") or
+  // exits, so the IPC response carries an authoritative status.
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    const check = () => {
+      const handle = agents.get(newName);
+      if (!handle) return finish();              // already exited
+      if (handle.spec.status !== "starting") return finish();
+      setTimeout(check, 50);
+    };
+    check();
+    setTimeout(finish, RENAME_SPAWN_AWAIT_TIMEOUT_MS);
+  });
+
+  const status = agents.get(newName)?.spec.status ?? "exited";
+  return { ok: true, status };
 }

@@ -31,7 +31,7 @@
 </script>
 
 <div class="chat-view" bind:this={viewport} onscroll={onScroll} role="log">
-  {#each chatList as entry (entry.ts + entry.kind + ("from" in entry ? entry.from : "sys"))}
+  {#each chatList as entry}
     {#if entry.kind === "chat"}
       {@const isMe = entry.from === $selfName}
       {@const noticeMatch = !isMe ? entry.content.match(/^\s*_\((notice|error):\s*(.*)\)_\s*$/s) : null}

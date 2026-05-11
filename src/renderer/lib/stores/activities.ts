@@ -11,3 +11,14 @@ export function setActivity(msg: ActivityMsg) {
     return m;
   });
 }
+
+export function renameActivityKey(oldName: string, newName: string) {
+  activities.update((map) => {
+    if (!map.has(oldName) || oldName === newName) return map;
+    const m = new Map(map);
+    const v = m.get(oldName)!;
+    m.delete(oldName);
+    m.set(newName, { ...v, name: newName });
+    return m;
+  });
+}

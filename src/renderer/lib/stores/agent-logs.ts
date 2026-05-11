@@ -37,3 +37,14 @@ export function dropLogs(name: string) {
     return m;
   });
 }
+
+export function renameLogKey(oldName: string, newName: string) {
+  agentLogs.update((map) => {
+    if (!map.has(oldName) || oldName === newName) return map;
+    const m = new Map(map);
+    const lines = m.get(oldName)!;
+    m.delete(oldName);
+    m.set(newName, lines);
+    return m;
+  });
+}

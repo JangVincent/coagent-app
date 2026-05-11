@@ -1,8 +1,9 @@
 <script lang="ts">
   import { rooms, activeRoomId, createRoom, ensureRoom, renameRoom, deleteRoom } from "../lib/stores/rooms.ts";
-  import { agents, addAgent, dropAgents, renameAgentInStore } from "../lib/stores/agents.ts";
+  import { agents, addAgent, dropAgents, renameAgentInStore, updateAgentStatus, setAgentPaused } from "../lib/stores/agents.ts";
   import { dropRoom } from "../lib/stores/messages.ts";
-  import { dropLogs } from "../lib/stores/agent-logs.ts";
+  import { dropLogs, renameLogKey } from "../lib/stores/agent-logs.ts";
+  import { renameActivityKey } from "../lib/stores/activities.ts";
   import { openTab, closeTab } from "../lib/stores/room-tabs.ts";
   import { activities } from "../lib/stores/activities.ts";
   import { selfName } from "../lib/stores/self.ts";
@@ -168,6 +169,15 @@
       return;
     }
     renameAgentInStore(oldName, newName);
+    renameLogKey(oldName, newName);
+    renameActivityKey(oldName, newName);
+    // New utilityProcess starts fresh — never paused. Reset the flag so the
+    // ContextMenu doesn't show a stale "Resume" label.
+    setAgentPaused(newName, false);
+    // Main returns the authoritative status post-respawn — apply it so the
+    // store doesn't carry the old agent's status (which would be stale once
+    // a new utilityProcess has been started under the new name).
+    if (res.status) updateAgentStatus(newName, res.status);
   }
 
   // ── room delete ──────────────────────────────────────────────────

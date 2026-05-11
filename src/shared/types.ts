@@ -49,7 +49,10 @@ export interface CoagentAPI {
   listSessions(cwd: string): Promise<{ sessions: PastSession[] }>;
   spawnAgent(spec: SpawnAgentOpts): Promise<{ ok: boolean; error?: string }>;
   killAgent(name: string): Promise<{ ok: boolean }>;
-  renameAgent(oldName: string, newName: string): Promise<{ ok: boolean; error?: string }>;
+  renameAgent(
+    oldName: string,
+    newName: string,
+  ): Promise<{ ok: boolean; error?: string; status?: AgentSpec["status"] }>;
   listAgents(): Promise<{ agents: AgentSpec[] }>;
   onAgentStatus(
     cb: (data: { name: string; status: AgentSpec["status"]; code?: number }) => void,
