@@ -1,7 +1,7 @@
 {
   "name": "coagent-app",
   "productName": "coagent",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Desktop app for coagent — multi-participant chat for Claude Code agents",
   "author": {
     "name": "Vincent Jang",
